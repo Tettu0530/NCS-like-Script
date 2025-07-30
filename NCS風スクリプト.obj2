@@ -1,0 +1,187 @@
+---@diagnostic disable: undefined-global
+--track@sphereSize:球サイズ, 0, 2160, 600
+--track@noiseHeight:ノイズ変位高さ, 0, 1000, 64
+--track@noisePeriod:ノイズ変位周期, 0, 200, 16
+--track@noiseZ:ノイズZ, -10000, 10000, 0
+--track@movementSmoothness:動きの滑らかさ, 1, 100, 20
+
+--color@color:色,0xffffff
+--check@isReactive:音声同期,1
+--check@isSpherical:球変換,1
+--check@applyNoise:ノイズ,1
+--value@pointerSize:点のサイズ,6
+--value@resolution:メッシュ分割数,64
+--value@projectionFactor:球体化の強さ,1.0
+--value@radiusReactionMultiplier:球サイズ感度,0.3
+--value@noiseReactionMultiplier:球ノイズ感度,0.2
+--value@noiseFlowSpeed:球ノイズ変異,{-0.2,-0.4,0.0}
+
+-- STATE
+local State = {
+  frame = obj.frame,
+  smoothedAudio = SMOOTHED_AUDIO_STRENGTH or 0
+}
+
+-- UTIL
+local Util = {}
+function Util.lerp(t, a, b) return a + t * (b - a) end
+
+function Util.lerp3D(t, ax, ay, az, bx, by, bz)
+  return Util.lerp(t, ax, bx), Util.lerp(t, ay, by), Util.lerp(t, az, bz)
+end
+
+-- PRE SETUP
+obj.setfont("MS UI Gothic", 100, 0, 0xffffff)
+obj.setoption("drawtarget", "tempbuffer", obj.screen_w, obj.screen_h)
+
+-- BITWISE EMU
+local bit = {}
+function bit.band(a, b)
+  local mask = b + 1
+  local result = math.fmod(math.floor(a), mask)
+  if result < 0 then
+    result = result + mask
+  end
+  return result
+end
+
+-- PERLINNOISE 3D
+local PerlinNoise3D = {}
+function PerlinNoise3D.new()
+  local obj_tbl = {
+    permutation = { 151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33, 88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196, 135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170, 213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228, 251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107, 49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254, 138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180 },
+    dot_product = {
+      [0x0] = function(x, y, z) return x + y end,
+      [0x1] = function(x, y, z) return -x + y end,
+      [0x2] = function(x, y, z) return x - y end,
+      [0x3] = function(x, y, z) return -x - y end,
+      [0x4] = function(x, y, z) return x + z end,
+      [0x5] = function(x, y, z) return -x + z end,
+      [0x6] = function(x, y, z) return x - z end,
+      [0x7] = function(x, y, z) return -x - z end,
+      [0x8] = function(x, y, z) return y + z end,
+      [0x9] = function(x, y, z) return -y + z end,
+      [0xA] = function(x, y, z) return y - z end,
+      [0xB] = function(x, y, z) return -y - z end,
+      [0xC] = function(x, y, z) return y + x end,
+      [0xD] = function(x, y, z) return -y + z end,
+      [0xE] = function(x, y, z) return y - x end,
+      [0xF] = function(x, y, z) return -y - z end,
+    },
+    p = {}
+  }
+  for i = 0, 255 do
+    obj_tbl.p[i] = obj_tbl.permutation[i + 1]
+    obj_tbl.p[i + 256] = obj_tbl.permutation[i + 1]
+  end
+  return setmetatable(obj_tbl, { __index = PerlinNoise3D })
+end
+
+function PerlinNoise3D.fade(t) return t * t * t * (t * (t * 6 - 15) + 10) end
+
+function PerlinNoise3D.grad(self, h, x, y, z) return self.dot_product[bit.band(h, 0xF)](x, y, z) end
+
+function PerlinNoise3D.noise(self, x, y, z)
+  y = y or 0; z = z or 0; local xi = bit.band(math.floor(x), 255); local yi = bit.band(math.floor(y), 255); local zi =
+      bit.band(math.floor(z), 255); x = x - math.floor(x); y = y - math.floor(y); z = z - math.floor(z); local u = self
+      .fade(
+        x); local v = self.fade(y); local w = self.fade(z); local p = self.p; local A, AA, AB, AAA, ABA, AAB, ABB, B, BA, BB, BAA, BBA, BAB, BBB; A =
+      p[xi] + yi; AA = p[A] + zi; AB = p[A + 1] + zi; AAA = p[AA]; ABA = p[AB]; AAB = p[AA + 1]; ABB = p[AB + 1]; B = p
+      [xi + 1] + yi; BA = p[B] + zi; BB = p[B + 1] + zi; BAA = p[BA]; BBA = p[BB]; BAB = p[BA + 1]; BBB = p[BB + 1]; return
+      Util.lerp(w,
+        Util.lerp(v, Util.lerp(u, self.grad(self, AAA, x, y, z), self.grad(self, BAA, x - 1, y, z)),
+          Util.lerp(u, self.grad(self, ABA, x, y - 1, z), self.grad(self, BBA, x - 1, y - 1, z))),
+        Util.lerp(v, Util.lerp(u, self.grad(self, AAB, x, y, z - 1), self.grad(self, BAB, x - 1, y, z - 1)),
+          Util.lerp(u, self.grad(self, ABB, x, y - 1, z - 1), self.grad(self, BBB, x - 1, y - 1, z - 1))))
+end
+
+-- SPHERICAL PROJECTOR
+local SphereProjector = {}; SphereProjector.__index = SphereProjector
+function SphereProjector.new(cx, cy, cz, r, wrap)
+  return setmetatable({ cx = cx, cy = cy, cz = cz, r = r, wrap = wrap }, SphereProjector)
+end
+
+function SphereProjector:project(fx, fy, fz)
+  local dx, dy, dz = fx - self.cx, fy - self.cy, fz - self.cz
+  local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+  if len == 0 then return self.cx, self.cy, self.cz end
+  local scale = self.r / len
+  local px = self.cx + dx * scale
+  local py = self.cy + dy * scale
+  local pz = self.cz + dz * scale
+  if self.wrap then
+    pz = math.abs(pz)
+  end
+  return px, py, pz
+end
+
+-- AUDIO
+local function sample_audio()
+  if isReactive ~= 1 then return 0 end
+  local count, _, buffer = obj.getaudio(nil, "audiobuffer", "fourier", 4096)
+  if count and count > 0 then
+    local sum = 0
+    for i = 1, count do sum = sum + buffer[i] end
+    return sum / count
+  end
+  return 0
+end
+
+local audioStrength = sample_audio()
+State.smoothedAudio = Util.lerp(movementSmoothness * 0.04, State.smoothedAudio, audioStrength)
+SMOOTHED_AUDIO_STRENGTH = State.smoothedAudio
+
+-- MESH AND NOISE SETUP
+local fieldSizeX, fieldSizeY = 800, 800
+local fieldGapX = fieldSizeX / (resolution - 1)
+local fieldGapY = fieldSizeY / (resolution - 1)
+local centerX, centerY = fieldSizeX / 2, fieldSizeY / 2
+
+local perlin = PerlinNoise3D.new()
+
+-- AUDIO REACTION CALCULATION
+local reactiveNoise = State.smoothedAudio * (noiseReactionMultiplier * 0.2)
+local reactiveRadius = State.smoothedAudio * (radiusReactionMultiplier * 0.1)
+
+local noiseAmp = noiseHeight + reactiveNoise
+local noiseFreq = noisePeriod * 0.001
+local currentNoiseZ = noiseZ
+local flowX = State.frame * (noiseFlowSpeed[1] * 0.1)
+local flowY = State.frame * (noiseFlowSpeed[2] * 0.1)
+local flowZ = currentNoiseZ
+
+-- SPHERICAL PROJECTOR SETUP
+local projector = nil
+if isSpherical == 1 and projectionFactor > 0 then
+  local baseRadius = sphereSize * 0.5 + reactiveRadius
+  projector = SphereProjector.new(0, 0, 0, baseRadius, true)
+end
+
+-- DRAW MESH
+obj.load("figure", "円", color, pointerSize)
+
+for xi = 0, resolution - 1 do
+  for yi = 0, resolution - 1 do
+    local x = xi * fieldGapX - centerX
+    local y = yi * fieldGapY - centerY
+    local z = 0
+
+    if applyNoise == 1 then
+      local dimOffset = 100
+      x = x + noiseAmp * perlin:noise(noiseFreq * xi + flowX, noiseFreq * yi, noiseFreq * flowZ + dimOffset)
+      y = y + noiseAmp * perlin:noise(noiseFreq * xi + dimOffset, noiseFreq * yi + flowY, noiseFreq * flowZ)
+      z = z + noiseAmp * perlin:noise(noiseFreq * xi, noiseFreq * yi + dimOffset, noiseFreq * flowZ)
+    end
+
+    if projector then
+      local sx, sy, sz = projector:project(x, y, z)
+      x, y, z = Util.lerp3D(projectionFactor, x, y, z, sx, sy, sz)
+    end
+
+    obj.draw(x, y, z)
+  end
+end
+
+-- POST PROCESSING
+obj.load("tempbuffer")
+obj.effect()
